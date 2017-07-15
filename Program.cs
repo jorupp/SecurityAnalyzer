@@ -1,9 +1,14 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Symbols;
@@ -11,26 +16,78 @@ using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.FindSymbols;
 using Microsoft.CodeAnalysis.MSBuild;
 using Microsoft.CodeAnalysis.Text;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace SecurityAnalyzer
 {
-    class Program
+    partial class Program
     {
         static void Main(string[] args)
         {
-            Run(args).Wait();
+            var data = Run(args).Result;
+            HostSite(data);
             Console.WriteLine("Done");
             Console.ReadLine();
         }
 
-        public class EnumUse
+        static void HostSite(List<KeyValuePair<IMethodSymbol, List<EnumUse>>> data)
         {
-            public ISymbol Method { get; set; }
-            public SyntaxNode Call { get; set; }
-            public MemberAccessExpressionSyntax Use { get; set; }
+            HomeController._data = data;
+            var host = new WebHostBuilder()
+                .UseKestrel()
+                .UseContentRoot(Path.Combine(Directory.GetCurrentDirectory(), @"..\..\wwwroot"))
+                .UseStartup<Startup>()
+                .UseUrls("http://localhost:9090")
+                .Build();
+
+            Process.Start("http://localhost:9090");
+            host.Run();
         }
 
-        static async Task Run(string[] args)
+        private class Startup
+        {
+            public Startup(IHostingEnvironment env)
+            {
+                var builder = new ConfigurationBuilder()
+                    //.SetBasePath(env.ContentRootPath)
+                    .AddEnvironmentVariables();
+                Configuration = builder.Build();
+            }
+
+            private IHostingEnvironment CurrentEnvironment { get; set; }
+            private IConfigurationRoot Configuration { get; }
+
+            public void ConfigureServices(IServiceCollection services)
+            {
+                services.AddMvc().AddRazorOptions(options => {
+                    var previous = options.CompilationCallback;
+                    options.CompilationCallback = context => {
+                        previous?.Invoke(context);
+                        var refs = AppDomain.CurrentDomain.GetAssemblies()
+                            .Where(x => !x.IsDynamic && !string.IsNullOrEmpty(x.Location))
+                            .Select(x => MetadataReference.CreateFromFile(x.Location))
+                            .ToList();
+                        context.Compilation = context.Compilation.AddReferences(refs);
+                    };
+                });
+            }
+
+            public void Configure(IApplicationBuilder app, ILoggerFactory loggerFactory)
+            {
+                loggerFactory.AddDebug();
+                app.UseStaticFiles();
+
+                app.UseMvc(routes => {
+                    routes.MapRoute(
+                        name: "default",
+                        template: "{controller=Home}/{action=Index}/{id?}");
+                });
+            }
+        }
+
+        static async Task<List<KeyValuePair<IMethodSymbol, List<EnumUse>>>> Run(string[] args)
         {
             var securityUsagesCache = new Dictionary<ISymbol, List<EnumUse>>();
 
@@ -45,22 +102,17 @@ namespace SecurityAnalyzer
             var webCompile = compiles[webProject];
             var controllers = webCompile.GetSymbolsWithName(i => i.EndsWith("Controller")).OfType<INamedTypeSymbol>().ToList();
 
-            Console.WriteLine($"Action\tMethod\tUse\tCall\tLocation");
+            var data = new List<KeyValuePair<IMethodSymbol, List<EnumUse>>>();
             foreach (var controller in controllers)
             {
                 var actions = controller.GetMembers().OfType<IMethodSymbol>().Where(i => i.DeclaredAccessibility == Accessibility.Public && i.MethodKind == MethodKind.Ordinary).ToList();
                 foreach (var action in actions)
                 {
                     var usages = await GetSecurityUsages(action);
-                    if (usages.Any())
-                    {
-                        foreach (var u in usages)
-                        {
-                            Console.WriteLine($"{action}\t{u.Method}\t{u.Use}\t{u.Call}\t{u.Call.GetLocation()}");
-                        }
-                    }
+                    data.Add(new KeyValuePair<IMethodSymbol, List<EnumUse>>(action, usages));
                 }
             }
+            return data;
 
             async Task<List<EnumUse>> GetSecurityUsages(ISymbol method)
             {
