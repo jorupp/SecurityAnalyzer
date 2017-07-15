@@ -85,6 +85,7 @@ namespace SecurityAnalyzer
                         var nearestInvoke = use.AncestorsAndSelf().OfType<InvocationExpressionSyntax>().FirstOrDefault();
                         if (null != nearestInvoke)
                         {
+                            // point to attach debugger to figure out how to deal with multi-line stuff
                             if (nearestInvoke.ToString().Contains("\n"))
                             {
                                 
@@ -103,6 +104,9 @@ namespace SecurityAnalyzer
                         var callTarget = model.GetSymbolInfo(call);
                         foreach (var candidate in callTarget.CandidateSymbols)
                         {
+                            // it seems like we should be able to call SymbolFinder.FindImplementationsAsync directly on candidate, but I get no results
+                            //   so instead, we call it on the type, then find members with the right name.
+                            //   this means we recurse to *all* overloads...
                             var classes = await SymbolFinder.FindImplementationsAsync(candidate.ContainingType, solution);
                             foreach (ITypeSymbol cls in classes)
                             {
