@@ -32,12 +32,15 @@ namespace SecurityAnalyzer
 
         static async Task Run(string[] args)
         {
+            var securityUsagesCache = new Dictionary<ISymbol, List<EnumUse>>();
+
+            // load and compile the solution
             string solutionPath = args[0];
             var msWorkspace = MSBuildWorkspace.Create();
             var solution = await msWorkspace.OpenSolutionAsync(solutionPath);
-
             var compiles = solution.Projects.ToDictionary(i => i, i => i.GetCompilationAsync().Result);
 
+            // find all 'Controller's in the web project
             var webProject = solution.Projects.Single(i => i.Name.EndsWith("Web"));
             var webCompile = compiles[webProject];
             var controllers = webCompile.GetSymbolsWithName(i => i.EndsWith("Controller")).OfType<INamedTypeSymbol>().ToList();
@@ -60,6 +63,30 @@ namespace SecurityAnalyzer
             }
 
             async Task<List<EnumUse>> GetSecurityUsages(ISymbol method)
+            {
+                List<EnumUse> list;
+                if (securityUsagesCache.TryGetValue(method, out list))
+                {
+                    return list;
+                }
+                
+                // load empty value to avoid recursion issues
+                securityUsagesCache.Add(method, new List<EnumUse>());
+                try
+                {
+                    list = await RawGetSecurityUsages(method);
+                    securityUsagesCache[method] = list; // replace empty value
+                    return list;
+                }
+                catch
+                {
+                    // remove dummy value so we'll retry later
+                    securityUsagesCache.Remove(method);
+                    throw;
+                }
+            }
+
+            async Task<List<EnumUse>> RawGetSecurityUsages(ISymbol method)
             {
                 //Console.WriteLine($"Checking {method}");
                 var usages = new List<EnumUse>();
